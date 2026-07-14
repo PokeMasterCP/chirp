@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
+	"strings"
 )
 
 func handlerHealth(w http.ResponseWriter, req *http.Request) {
@@ -39,7 +41,7 @@ func handlerValidateChirp(w http.ResponseWriter, req *http.Request) {
 	}
 
 	type validResponse struct {
-		Valid bool `json:"valid"`
+		CleanedBody string `json:"cleaned_body"`
 	}
 
 	params, err := helperReadJSON[chirp](req.Body)
@@ -57,7 +59,8 @@ func handlerValidateChirp(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	response := validResponse{Valid: true}
+	cleanedChirp := helperCleanOutput(params.Body)
+	response := validResponse{CleanedBody: cleanedChirp}
 	helperRespondWithJSON(response, w, http.StatusOK)
 }
 
@@ -83,4 +86,20 @@ func helperRespondWithJSON[T any](payload T, w http.ResponseWriter, statusCode i
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	w.Write(data)
+}
+
+func helperCleanOutput(body string) string {
+	badWords := []string{"kerfuffle", "sharbert", "fornax"}
+	inputWords := strings.Fields(body)
+	cleanWords := []string{}
+
+	for _, word := range inputWords {
+		normalized := strings.ToLower(word)
+		if slices.Contains(badWords, normalized) {
+			word = "****"
+		}
+		cleanWords = append(cleanWords, word)
+	}
+
+	return strings.Join(cleanWords, " ")
 }
