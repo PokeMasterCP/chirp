@@ -8,6 +8,10 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/PokeMasterCP/chirp/internal/auth"
+	"github.com/PokeMasterCP/chirp/internal/database"
+	"github.com/google/uuid"
 )
 
 func handlerHealth(w http.ResponseWriter, req *http.Request) {
@@ -40,16 +44,8 @@ func (cfg *apiConfig) handlerReset(w http.ResponseWriter, req *http.Request) {
 	helperRespondWithJSON(struct{}{}, w, http.StatusOK)
 }
 
-func handlerValidateChirp(w http.ResponseWriter, req *http.Request) {
-	type chirp struct {
-		Body string `json:"body"`
-	}
-
-	type validResponse struct {
-		CleanedBody string `json:"cleaned_body"`
-	}
-
-	params, err := helperReadJSON[chirp](req.Body)
+func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, req *http.Request) {
+	chirpRequest, err := helperReadJSON[Chirp](req.Body)
 	if err != nil {
 		errorMessage := fmt.Sprintf("failed to unmarshal json request: %s", err)
 		log.Println(errorMessage)
@@ -57,19 +53,41 @@ func handlerValidateChirp(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if len(params.Body) > 140 {
+	if len(chirpRequest.Body) > 140 {
 		helperJSONError(w, "Chirp is too long", http.StatusBadRequest)
 		return
 	}
 
-	cleanedChirp := helperCleanOutput(params.Body)
-	response := validResponse{CleanedBody: cleanedChirp}
-	helperRespondWithJSON(response, w, http.StatusOK)
+	cleanedText := helperCleanChirp(chirpRequest.Body)
+
+	queryParams := database.CreateChirpParams{
+		Body:   cleanedText,
+		UserID: chirpRequest.UserID,
+	}
+
+	chirpRecord, err := cfg.db.CreateChirp(req.Context(), queryParams)
+	if err != nil {
+		errorMessage := fmt.Sprintf("error creating chirp: %s", err)
+		log.Println(errorMessage)
+		helperJSONError(w, errorMessage, http.StatusInternalServerError)
+		return
+	}
+
+	response := Chirp{
+		ID:        chirpRecord.ID,
+		CreatedAt: chirpRecord.CreatedAt,
+		UpdatedAt: chirpRecord.UpdatedAt,
+		Body:      chirpRecord.Body,
+		UserID:    chirpRecord.UserID,
+	}
+
+	helperRespondWithJSON(response, w, http.StatusCreated)
 }
 
 func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, req *http.Request) {
 	type parameters struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	params, err := helperReadJSON[parameters](req.Body)
@@ -80,7 +98,25 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, req *http.Request
 		return
 	}
 
-	newUser, err := cfg.db.CreateUser(req.Context(), params.Email)
+	if params.Password == "" {
+		helperJSONError(w, "password is required", http.StatusBadRequest)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		errorMessage := fmt.Sprintf("failed to hash password: %s", err)
+		log.Println(errorMessage)
+		helperJSONError(w, errorMessage, http.StatusInternalServerError)
+		return
+	}
+
+	newUserParams := database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+	}
+
+	newUser, err := cfg.db.CreateUser(req.Context(), newUserParams)
 	if err != nil {
 		errorMessage := fmt.Sprintf("error creating user: %s", err)
 		log.Println(errorMessage)
@@ -89,14 +125,104 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, req *http.Request
 	}
 	log.Printf("created user: %s", newUser)
 
-	user := User{
+	helperRespondWithJSON(User{
 		ID:        newUser.ID,
 		CreatedAt: newUser.CreatedAt,
 		UpdatedAt: newUser.UpdatedAt,
 		Email:     newUser.Email,
+	}, w, http.StatusCreated)
+}
+
+func (cfg *apiConfig) handlerGetAllChirps(w http.ResponseWriter, req *http.Request) {
+	chirps, err := cfg.db.GetAllChirps(req.Context())
+	if err != nil {
+		errorMessage := fmt.Sprintf("failed to query chirps db: %s", err)
+		log.Println(errorMessage)
+		helperJSONError(w, errorMessage, http.StatusInternalServerError)
+		return
 	}
 
-	helperRespondWithJSON(user, w, http.StatusCreated)
+	apiChirps := []Chirp{}
+	for _, dbChirp := range chirps {
+		apiChirps = append(apiChirps, Chirp{
+			ID:        dbChirp.ID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+		})
+	}
+
+	helperRespondWithJSON(apiChirps, w, http.StatusOK)
+}
+
+func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, req *http.Request) {
+	chirpID := req.PathValue("chirpID")
+
+	uuid, err := uuid.Parse(chirpID)
+	if err != nil {
+		errorMessage := "invalid UUID"
+		log.Println(errorMessage)
+		helperJSONError(w, errorMessage, http.StatusBadRequest)
+		return
+	}
+
+	chirp, err := cfg.db.GetChirp(req.Context(), uuid)
+	if err != nil {
+		helperJSONError(w, "chirp not found", http.StatusNotFound)
+		return
+	}
+
+	response := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+
+	helperRespondWithJSON(response, w, http.StatusOK)
+}
+
+func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, req *http.Request) {
+	type parameters struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	params, err := helperReadJSON[parameters](req.Body)
+	if err != nil {
+		errorMessage := fmt.Sprintf("failed to unmarshal json request: %s", err)
+		log.Println(errorMessage)
+		helperJSONError(w, errorMessage, http.StatusInternalServerError)
+		return
+	}
+
+	user, err := cfg.db.GetUserByEmail(req.Context(), params.Email)
+	if err != nil {
+		log.Printf("error getting user: %s", err)
+		helperJSONError(w, "incorrect email or password", http.StatusUnauthorized)
+		return
+	}
+
+	match, err := auth.CheckPasswordHash(params.Password, user.HashedPassword)
+	if err != nil {
+		log.Printf("error checking password: %s", err)
+		helperJSONError(w, "incorrect email or password", http.StatusUnauthorized)
+		return
+	}
+
+	if !match {
+		helperJSONError(w, "incorrect email or password", http.StatusUnauthorized)
+		return
+	}
+
+	helperRespondWithJSON(User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}, w, http.StatusOK)
 }
 
 func helperReadJSON[T any](req io.Reader) (T, error) {
@@ -141,7 +267,7 @@ func helperRespondWithJSON[T any](payload T, w http.ResponseWriter, statusCode i
 	w.Write(data)
 }
 
-func helperCleanOutput(body string) string {
+func helperCleanChirp(body string) string {
 	badWords := []string{"kerfuffle", "sharbert", "fornax"}
 	inputWords := strings.Fields(body)
 	cleanWords := []string{}
