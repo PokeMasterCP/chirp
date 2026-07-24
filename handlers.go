@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/PokeMasterCP/chirp/internal/auth"
 	"github.com/PokeMasterCP/chirp/internal/database"
@@ -53,6 +54,19 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, req *http.Reques
 		return
 	}
 
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		helperJSONError(w, "Authorization header not provided", http.StatusUnauthorized)
+		return
+	}
+
+	loggedInUserID, err := auth.ValidateJWT(token, cfg.jwtSecret)
+	if err != nil {
+		log.Printf("invalid JWT: %v", err)
+		helperJSONError(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if len(chirpRequest.Body) > 140 {
 		helperJSONError(w, "Chirp is too long", http.StatusBadRequest)
 		return
@@ -62,7 +76,7 @@ func (cfg *apiConfig) handlerCreateChirp(w http.ResponseWriter, req *http.Reques
 
 	queryParams := database.CreateChirpParams{
 		Body:   cleanedText,
-		UserID: chirpRequest.UserID,
+		UserID: loggedInUserID,
 	}
 
 	chirpRecord, err := cfg.db.CreateChirp(req.Context(), queryParams)
@@ -186,8 +200,9 @@ func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, req *http.Request) 
 
 func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, req *http.Request) {
 	type parameters struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email     string `json:"email"`
+		Password  string `json:"password"`
+		ExpiresIn int    `json:"expires_in"`
 	}
 
 	params, err := helperReadJSON[parameters](req.Body)
@@ -196,6 +211,10 @@ func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, req *http.Request)
 		log.Println(errorMessage)
 		helperJSONError(w, errorMessage, http.StatusInternalServerError)
 		return
+	}
+
+	if params.ExpiresIn <= 0 || params.ExpiresIn > 3600 {
+		params.ExpiresIn = 3600
 	}
 
 	user, err := cfg.db.GetUserByEmail(req.Context(), params.Email)
@@ -217,12 +236,29 @@ func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
-	helperRespondWithJSON(User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-	}, w, http.StatusOK)
+	token, err := auth.MakeJWT(user.ID, cfg.jwtSecret, time.Duration(params.ExpiresIn)*time.Second)
+	if err != nil {
+		log.Printf("error generating JWT: %s", err)
+		helperJSONError(w, "failed to generate JWT", http.StatusInternalServerError)
+		return
+	}
+
+	type loginResponse struct {
+		User
+		Token string `json:"token"`
+	}
+
+	response := loginResponse{
+		User: User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		},
+		Token: token,
+	}
+
+	helperRespondWithJSON(response, w, http.StatusOK)
 }
 
 func helperReadJSON[T any](req io.Reader) (T, error) {

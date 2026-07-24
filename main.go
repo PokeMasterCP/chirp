@@ -19,6 +19,7 @@ type apiConfig struct {
 	fileServerHits atomic.Int32
 	db             *database.Queries
 	platform       string
+	jwtSecret      string
 }
 
 type User struct {
@@ -49,6 +50,7 @@ func main() {
 	cfg := apiConfig{}
 	cfg.db = database.New(db)
 	cfg.platform = os.Getenv("PLATFORM")
+	cfg.jwtSecret = os.Getenv("JWT_SECRET")
 
 	mux.HandleFunc("GET /api/healthz", handlerHealth)
 	mux.HandleFunc("GET /admin/metrics", cfg.handlerNumHits)

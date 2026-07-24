@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -64,5 +65,66 @@ func TestValidateJWTRejectsExpiredToken(t *testing.T) {
 
 	if validatedUserID != uuid.Nil {
 		t.Fatalf("expected uuid.Nil, got %v", validatedUserID)
+	}
+}
+
+func TestGetBearerToken(t *testing.T) {
+	tests := []struct {
+		name        string
+		authHeader  string
+		expected    string
+		expectError bool
+	}{
+		{
+			name:       "valid bearer token",
+			authHeader: "Bearer exampleToken",
+			expected:   "exampleToken",
+		},
+		{
+			name:        "missing authorization header",
+			expectError: true,
+		},
+		{
+			name:        "wrong authorization scheme",
+			authHeader:  "Basic exampleToken",
+			expectError: true,
+		},
+		{
+			name:        "missing space after bearer scheme",
+			authHeader:  "BearerexampleToken",
+			expectError: true,
+		},
+		{
+			name:        "missing token",
+			authHeader:  "Bearer ",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headers := http.Header{}
+			if tt.authHeader != "" {
+				headers.Set("Authorization", tt.authHeader)
+			}
+
+			token, err := GetBearerToken(headers)
+			if tt.expectError {
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+				if token != "" {
+					t.Fatalf("expected an empty token, got %q", token)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if token != tt.expected {
+				t.Fatalf("expected token %q, got %q", tt.expected, token)
+			}
+		})
 	}
 }
